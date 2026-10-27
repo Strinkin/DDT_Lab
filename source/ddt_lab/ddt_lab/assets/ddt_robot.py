@@ -28,6 +28,84 @@ from isaaclab.assets.articulation import ArticulationCfg
 DDT_MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../ddt_ros2_control/urdfs"))
 
 
+ANDYMINI_CFG = ArticulationCfg(
+    spawn=sim_utils.UrdfFileCfg(
+        usd_dir=os.path.expanduser("~/.cache/IsaacLab/andymini"),
+
+        fix_base=False,
+        # Keep the two unactuated wheel_1 joints in the articulation.  They
+        # model Andy's passive support wheels and must not be merged away.
+        merge_fixed_joints=False,
+        replace_cylinders_with_capsules=False,
+        asset_path=f"{DDT_MODEL_DIR}/andymini_description/urdf/andymini.urdf",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        # This is the nominal height used by the supplied MuJoCo model too.
+        pos=(0.0, 0.0, 0.35),
+        joint_pos={
+            "joint_left_leg_1": 0.0,
+            "joint_left_leg_2": 0.66,
+            "joint_left_leg_3": 0.0,
+            "joint_right_leg_1": 0.0,
+            "joint_right_leg_2": 0.66,
+            "joint_right_leg_3": 0.0,
+            "joint_left_wheel_1": 0.0,
+            "joint_right_wheel_1": 0.0,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": DCMotorCfg(
+            joint_names_expr=[".*_leg_(1|2)"],
+            # andymini.urdf: effort=11 N*m, velocity=12.57 rad/s.
+            # No separate stall torque is specified; use the URDF effort limit.
+            effort_limit=11.0,
+            saturation_effort=11.0,  # 该参数
+            velocity_limit=12.57,
+            stiffness=40.0,
+            damping=1,
+            friction=0.0,
+        ),
+        "drive_wheels": ImplicitActuatorCfg(
+            joint_names_expr=[".*_leg_3"],
+            effort_limit_sim=11.0,
+            velocity_limit_sim=12.57,
+            stiffness=0.0,
+            damping=0.5,
+            friction=0.0,
+        ),
+        # These joints have no command channel in the reference MuJoCo model.
+        # A zero-effort actuator keeps them passive while making the complete
+        # articulation assignment explicit to Isaac Lab.
+        "passive_wheels": ImplicitActuatorCfg(
+            joint_names_expr=[".*_wheel_1"],
+            effort_limit_sim=0.0,
+            velocity_limit_sim=1000.0,
+            stiffness=0.0,
+            damping=0.001,
+            friction=0.001,
+        ),
+    },
+)
+
+
 DDT_TITA_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
