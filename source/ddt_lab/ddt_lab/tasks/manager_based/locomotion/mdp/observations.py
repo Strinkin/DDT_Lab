@@ -61,7 +61,7 @@ def contact_state(
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     net_forces = sensor.data.net_forces_w[:, sensor_cfg.body_ids, :]  # (B, K, 3)
     in_contact = (net_forces.norm(dim=-1) > threshold).float()        # (B, K)
-    return in_contact - 0.5
+    return in_contact - 0.5  # 减去 0.5 将接触状态中心化，使得接触状态为 +0.5，非接触状态为 -0.5
 
 
 def joint_kp_factor(

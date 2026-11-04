@@ -74,11 +74,11 @@ ANDYMINI_CFG = ArticulationCfg(
     actuators={
         "legs": DCMotorCfg(
             joint_names_expr=[".*_leg_(1|2)"],
-            # andymini.urdf: effort=11 N*m, velocity=12.57 rad/s.
+            # andymini.urdf: effort=18.94 N*m, velocity=8.86 rad/s.
             # No separate stall torque is specified; use the URDF effort limit.
-            effort_limit=11.0,
-            saturation_effort=11.0,  # 该参数
-            velocity_limit=12.57,
+            effort_limit=18.94,
+            saturation_effort=18.94,
+            velocity_limit=8.86,
             stiffness=40.0,
             damping=1,
             friction=0.0,

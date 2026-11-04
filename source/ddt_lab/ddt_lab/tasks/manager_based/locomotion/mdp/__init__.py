@@ -13,3 +13,5 @@ from .curriculums import *  # noqa: F401, F403
 from .events import *  # noqa: F401, F403
 from .observations import *  # noqa: F401, F403
 from .rewards import *  # noqa: F401, F403
+# 自定义组件最后导出，保持原自定义奖励对同名函数的覆盖顺序。
+from .mdp_strinkin import *  # noqa: F401, F403
