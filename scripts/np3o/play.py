@@ -25,8 +25,12 @@ parser.add_argument(
     '--export_dir', type=str, default=None,
     help='Override export directory (defaults to <checkpoint_dir>/exported).',
 )
+parser.add_argument('--keyboard', action='store_true', help='Window keyboard: W/S vx, A/D yaw, Q/E lower/raise height, Space stop, R reset.')
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
+
+if args_cli.keyboard and args_cli.headless:
+    parser.error('--keyboard requires a window; remove --headless.')
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -37,6 +41,7 @@ import torch
 from isaaclab_tasks.utils import get_checkpoint_path
 
 from ddt_lab.algorithms.np3o import IsaacLabNP3OWrapper, OnConstraintPolicyRunner
+from keyboard_controller import KeyboardController
 
 
 def _resolve_runner_cfg(entry_point: str) -> dict:
@@ -55,6 +60,16 @@ def main():
     env_cfg = env_cfg_entry() if callable(env_cfg_entry) else env_cfg_entry
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if args_cli.keyboard:
+        env_cfg.scene.num_envs = 1
+        env_cfg.terminations.time_out = None
+        env_cfg.commands.base_velocity.heading_command = False
+        env_cfg.commands.base_velocity.rel_standing_envs = 0.0
+        # 键盘模式从默认高度启动；保持训练范围，后续由控制器接管目标。
+        height_cfg = getattr(env_cfg.commands, 'base_height', None)
+        if height_cfg is not None:
+            height_cfg.resampling_time_range = (1.0e9, 1.0e9)  # 避免键盘输入被定时重采样覆盖
 
     env = gym.make(args_cli.task, cfg=env_cfg)
     env = IsaacLabNP3OWrapper(env, device=args_cli.device or 'cuda:0')
@@ -81,11 +96,24 @@ def main():
 
     policy = runner.get_inference_policy(args_cli.device or 'cuda:0')
     obs = env.get_observations()
-    while simulation_app.is_running():
-        with torch.inference_mode():
-            actions = policy(obs)
-            obs, _, _, _, _, _ = env.step(actions)
-    env.env.close()
+    controller = None
+    try:
+        if args_cli.keyboard:
+            # Configure limits, increments and timeout through constructor arguments.
+            controller = KeyboardController(env)
+            print('[INFO] Focus the Isaac Sim window: W/S vx, A/D yaw, Space stop, Q/E lower/raise height (0.01 m), Space stop (keep height), R reset (height 0.35 m).')
+        while simulation_app.is_running():
+            with torch.inference_mode():
+                if controller is not None:
+                    obs = controller.apply(obs)
+                actions = policy(obs)
+                obs, _, _, _, dones, _ = env.step(actions)
+                if controller is not None:
+                    obs = controller.apply(obs, advance_history=True, reset_mask=dones)
+    finally:
+        if controller is not None:
+            controller.close()
+        env.env.close()
 
 
 if __name__ == '__main__':
