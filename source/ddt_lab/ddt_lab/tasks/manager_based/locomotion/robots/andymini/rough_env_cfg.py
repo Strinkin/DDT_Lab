@@ -111,6 +111,13 @@ class CommandsCfg:  # 定义环境中的指令生成配置
         ),
     )
 
+    # 独立的一维目标高度指令，单位为米；已接入策略、Critic 观测和高度奖励。
+    # 先用固定高度验证指令机制，之后再按机器人可达范围开放随机采样。
+    base_height = mdp.UniformHeightCommandCfg(
+        resampling_time_range=(10.0, 10.0),  # 重采样间隔范围，单位 s
+        height_range=(0.25, 0.35),  # 目标高度范围，单位 m；上下限相同表示固定高度
+    )
+
 
 @configclass
 class ActionsCfg:
@@ -129,7 +136,7 @@ class ActionsCfg:
         asset_name="robot",
         joint_names=["joint_left_leg_2"],
         clip={".*": (-100.0, 100.0)},
-        scale=0.25,
+        scale=0.66,
         use_default_offset=True,
         preserve_order=True,
     )
@@ -153,7 +160,7 @@ class ActionsCfg:
         asset_name="robot",
         joint_names=["joint_right_leg_2"],
         clip={".*": (-100.0, 100.0)},
-        scale=0.25,
+        scale=0.66,
         use_default_offset=True,
         preserve_order=True,
     )
@@ -189,6 +196,11 @@ class ObservationsCfg:
             clip=(-100.0, 100.0),
             scale=(2.0, 2.0, 0.25),
         )
+        height_commands = ObsTerm(
+            func=mdp.generated_commands,  # 从指令管理器读取目标值
+            params={"command_name": "base_height"},  # 对应高度指令名称
+            scale=1.0,  # 保持米为单位，不额外缩放
+        )
         joint_pos = ObsTerm(
             func=mdp.joint_pos_rel_without_wheel,
             params={
@@ -201,7 +213,7 @@ class ObservationsCfg:
         )
         joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*", preserve_order=True)},
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["joint_left_leg_[123]", "joint_right_leg_[123]"], preserve_order=True)},
             noise=Unoise(n_min=-1.5, n_max=1.5),
             clip=(-100.0, 100.0),
             scale=0.05,
@@ -215,9 +227,9 @@ class ObservationsCfg:
         #     scale=1.0
         # )
 
-        def __post_init__(self):
-            self.enable_corruption = True
-            self.concatenate_terms = True
+        def __post_init__(self):  # 配置实例创建后自动调用，设置额外配置
+            self.enable_corruption = True  # 启用观测噪声，具体噪声由各观测项的 noise 参数定义
+            self.concatenate_terms = True  # 按观测项声明顺序，将组内观测拼接为一个 Tensor
 
     @configclass
     class CriticCfg(ObsGroup):
@@ -232,6 +244,15 @@ class ObservationsCfg:
             params={"command_name": "base_velocity"},
             clip=(-100.0, 100.0),
             scale=(2.0, 2.0, 0.25),
+        )
+        height_commands = ObsTerm(
+            func=mdp.generated_commands,  # 从指令管理器读取目标高度
+            params={"command_name": "base_height"},  # 对应独立高度指令
+            scale=1.0,  # 单位 m，不额外缩放
+        )
+        base_height = ObsTerm(
+            func=mdp.base_height_relative,  # 实际高度，仅作为 Critic 的特权观测
+            scale=1.0,  # 单位 m，不额外缩放
         )
         joint_pos = ObsTerm(
             func=mdp.joint_pos_rel_without_wheel,
@@ -313,6 +334,7 @@ class ObservationsCfg:
     priv: PrivCfg = PrivCfg()
     scanner: ScannerCfg = ScannerCfg()
 
+
 @configclass
 class EventCfg:
     """Configuration for events."""
@@ -359,7 +381,7 @@ class EventCfg:
         },
     )
 
-    # reset
+    # reset 的时候施加 ±10N 外力和 ±10Nm 力矩，增加环境扰动
     base_external_force_torque = EventTerm(
         func=mdp.apply_external_force_torque,
         mode="reset",
@@ -374,7 +396,7 @@ class EventCfg:
         func=mdp.randomize_actuator_gains,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_[123]"),
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.8, 1.2),
             "operation": "scale",
@@ -402,12 +424,13 @@ class EventCfg:
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_[123]"),
             "position_range": (-0.5, 1.0),
             "velocity_range": (-0.0, 0.0),
         },
     )
 
-    # interval
+    # interval 每 10–15 秒的 XY ±0.5 m/s
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
@@ -420,23 +443,38 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
+    # 仅非超时终止时触发；正常跑满 episode 不受罚。
+    is_terminated = RewTerm(
+        func=mdp.is_terminated,
+        weight=-1.0,
+    )
     # -- task
-    track_lin_vel_xy_exp = RewTerm(
-        func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+    # track_lin_vel_xy_exp = RewTerm(
+    #     func=mdp.track_lin_vel_xy_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+    # )
+    # 只跟踪x方向的线速度，y方向不跟踪
+    track_lin_vel_x_exp = RewTerm(
+        func=mdp.track_lin_vel_x_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     )
     # -- penalties
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.10)
+    dof_torques_l2 = RewTerm(
+        func=mdp.joint_torques_l2, weight=-1.0e-5,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_[123]")},
+    )
+    dof_acc_l2 = RewTerm(
+        func=mdp.joint_acc_l2, weight=-2.5e-7,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_[123]")},
+    )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     # wheels_action_rate_l2 = RewTerm(
     #     func=mdp.wheels_action_rate_l2,
     #     weight=-0.001,
-    #     params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_4")},
+    #     params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_leg_3")},
     # )
 
     # feet_air_time = RewTerm(
@@ -465,31 +503,55 @@ class RewardsCfg:
     #         "asset_cfg": SceneEntityCfg("robot", joint_names=["joint_left_leg_1", "joint_right_leg_1"]),
     #     },
     # )
-    stand_still = RewTerm(
-        func=mdp.stand_still,
-        weight=0.0,
-        params={
-            "command_name": "base_velocity",
-            "command_threshold": 0.1,
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_leg_3"]),
-        },
-    )
+    # stand_still = RewTerm(
+    #     func=mdp.stand_still,
+    #     weight=0.0,
+    #     params={
+    #         "command_name": "base_velocity",
+    #         "command_threshold": 0.1,
+    #         "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_leg_3"]),
+    #     },
+    # )
     # -- Contact sensor
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_leg_(1|2)"]), "threshold": 1.0},
     )
+    # 辅助轮触地惩罚，不区分目标高度或机器人姿态。
+    auxiliary_wheel_contacts = RewTerm(
+        func=mdp.auxiliary_contact,
+        weight=-2.0,
+        params={"sensor_cfg": SceneEntityCfg(
+            "contact_forces", body_names=["left_wheel_1", "right_wheel_1"]
+        )},
+    )
     # -- optional penalties
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-5.0)
     # dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
-    base_height_l2 = RewTerm(
-        func=mdp.base_height_l2,
-        weight=-10.0,
+    # 旧高度平方惩罚保留供对照，当前不启用。
+    # base_height_l2 = RewTerm(
+    #     func=mdp.track_base_height_l2,
+    #     weight=-100.0,
+    #     params={"command_name": "base_height"},
+    # )
+    # 高度跟踪奖励 = 6.0 * exp(-err**2 / 0.0049)
+    tracking_base_height = RewTerm(
+        func=mdp.tracking_base_height_exp,  # 容差带内为 1，带外按平方误差指数衰减
+        weight=1.0,  # 高度跟踪奖励权重
         params={
-            # "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-            # "sensor_cfg": SceneEntityCfg("height_scanner_base"),
-            "target_height": 0.3,
+            "command_name": "base_height",  # 目标高度指令
+            "sigma": 0.07**2,  # 指数分母，单位 m²
+            "tolerance": 0.01,  # 目标高度两侧的容差，单位 m
+        },
+    )
+    # 高度误差惩罚 = -10.0 * err
+    base_height_error = RewTerm(
+        func=mdp.base_height_error,  # 计算容差带外的线性误差
+        weight=-10.0,  # 高度误差惩罚权重
+        params={
+            "command_name": "base_height",  # 目标高度指令
+            "tolerance": 0.01,  # 目标高度两侧的容差，单位 m
         },
     )
 
@@ -497,11 +559,12 @@ class RewardsCfg:
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
-
+    # 超时终止，episode 长度超过 20 秒时触发
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    # leg_1、leg_2、base_link 接触力超过 1 N 会终止
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"), "threshold": 1.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*_leg_(1|2)"]), "threshold": 1.0},
     )
 
 
@@ -565,6 +628,9 @@ class AndyminiRoughEnvCfg(ManagerBasedRLEnvCfg):
         self.observations.policy.history_length = 10
         self.observations.policy.flatten_history_dim = False
 
+        # 禁用重置时施加外力和力矩的事件。
+        self.events.base_external_force_torque = None
+        
     # def disable_zero_weight_rewards(self):
     #     """If the weight of rewards is 0, set rewards to None"""
     #     for attr in dir(self.rewards):
@@ -590,4 +656,3 @@ class AndyminiRoughEnvCfg_PLAY(AndyminiRoughEnvCfg):  # 继承训练配置，定
         self.observations.policy.enable_corruption = False  # 关闭策略观测噪声
         self.events.base_external_force_torque = None  # 禁用重置时施加外力和力矩的事件
         self.events.push_robot = None  # 禁用周期性速度推扰事件
-
